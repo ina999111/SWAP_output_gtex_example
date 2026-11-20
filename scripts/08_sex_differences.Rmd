@@ -1,0 +1,154 @@
+---
+title: "08_sex_differences"
+author: "Ina MP"
+date: "2026-11-19"
+output: github_document
+---
+
+- **Purpose:** Compare task scores between sexes
+- **Input:** wide score df
+- **Output:** 
+  - df with FC and pvalues
+  - plots
+  
+```{r}
+library(ggrepel)
+```
+
+```{r}
+load("data/processed/scores_long.RData")
+```
+
+# join task numbers and names
+
+```{r}
+tasklist <- read.xlsx('data/SWAP_input/tasklist_test_gtex.xlsx')
+
+tasklist_names <- tasklist %>%
+  filter(!is.na(ID)) %>%
+  dplyr::select(c('ID', 'DESCRIPTION', 'SHOULD.FAIL')) %>%
+  mutate(ID = paste('task', ID, sep = '_'))
+```
+
+```{r}
+df_results_scores <- df_results_scores %>%
+  left_join(tasklist_names, join_by('task' == 'ID')) %>%
+  mutate(task_name = paste0(task, ': ', DESCRIPTION))
+```
+
+# join df containing sex information
+```{r}
+load('data/raw/counts_subset.RData')
+load('data/raw/samples_and_subjects_clean_subset.RData')
+```
+
+replace sample numbers with name
+```{r}
+samples_names <- colnames(counts_subset)[grepl('GTEX', colnames(counts_subset))]
+df_results_scores$sample_name <- samples_names[df_results_scores$sample]
+```
+
+```{r}
+df_results_scores <- df_results_scores %>%
+  left_join(samples_and_subjects_clean_subset %>%
+              dplyr::select(SAMPID, donor_ID, SEX),
+            join_by('sample_name' == 'SAMPID'))
+```
+
+# compute FC and pvalue
+
+```{r}
+list_tasks <- unique(df_results_scores$task)
+```
+
+```{r}
+df_scores_wide <- df_results_scores %>%
+  dplyr::select(donor_ID, task, score, SEX) %>%
+  pivot_wider(names_from = 'task', values_from = 'score')
+```
+
+
+```{r}
+compare_sexes <- function(task, df) {
+  
+  print(paste0('running for ', task))
+  
+  formula <- as.formula(paste('rank(', task, ')~ SEX'))
+  results <- lm(formula, df)
+  anova_results <- car::Anova(results)
+  
+  pvalue_sex <- anova_results['SEX', 'Pr(>F)']
+  
+  FC <- median(df[[task]][df[['SEX']] == 2], na.rm = T) / median(df[[task]][df[['SEX']] == 1], na.rm = T)
+  
+  return(data.frame('task' = task, 'pvalue_sex' = pvalue_sex, 'FC' = FC, 'df' = deparse(substitute(df))))
+  
+}
+
+compare_sexes('task_411', df_scores_wide)
+
+```
+
+apply to all tasks
+```{r}
+df_results_sex_comparison <- lapply(list_tasks, compare_sexes, df = df_scores_wide) %>%
+  bind_rows(.)
+```
+
+adjust pvalue and add task name
+```{r}
+df_results_sex_comparison_clean <- df_results_sex_comparison %>%
+  left_join(tasklist_names, join_by('task' == 'ID')) %>%
+  mutate(adj_pval_sex = p.adjust(pvalue_sex, method = 'BH'),
+         plot_sign = case_when(adj_pval_sex < 0.05 & FC - 1 > 0.1 ~ 'sign_F',
+                               adj_pval_sex < 0.05 & 1 - FC > 0.1 ~ 'sign_M',
+                               .default = 'not_sign'),
+         task_name = paste0(task, ': ', DESCRIPTION))
+```
+
+volcano plot
+```{r}
+
+palette_plot_sign = c("sign_M" = "#4A6FA5", "sign_F" = "#D64550", "not_sign" = 'grey')
+
+
+ggplot(df_results_sex_comparison_clean, aes(x = FC, y = -log2(adj_pval_sex), 
+                                            color = plot_sign))+
+  geom_point()+
+  geom_hline(yintercept =  -log2(0.05), linetype = 'dashed', color = 'black')+
+  geom_vline(xintercept = c(0.9, 1.1), linetype = 'dashed', color = 'black')+
+  scale_color_manual(values = palette_plot_sign) +
+  geom_text_repel(
+    data = subset(df_results_sex_comparison_clean, plot_sign != 'not_sign'),
+    aes(label = stringr::str_wrap(task_name, 35)),
+    size = 3,
+    max.overlaps = Inf,   # don't drop labels when the plot is crowded
+    show.legend = FALSE   # keeps the legend from showing an "a" glyph
+  ) +
+  theme_minimal()+
+  labs(y = "-log2 pvalue",
+       x = 'Fold change')
+```
+in this case nothing is significant so not very pretty 
+
+boxplot specific tasks by sex
+```{r}
+plot_by_sex <- function(df, var, log_scale = F){
+  
+  plot <- ggplot(df, aes(y = .data[[var]], x = SEX, fill = SEX, color = SEX))+
+    geom_point(position = position_jitter(width = 0.2), alpha = 0.25)+
+    geom_boxplot(outlier.alpha = 0, alpha = 0.5, size = 1)+
+    theme_minimal()+
+    scale_fill_manual(values =  c("#4A6FA5", "#D64550"))+
+    scale_color_manual(values =  c("#4A6FA5", "#D64550"))+
+    guides(fill = 'none')
+  
+  if (log_scale) plot <- plot + scale_y_log10()
+  
+  return(plot)
+}
+
+plot_by_sex(df = df_scores_wide, var = 'task_411')
+```
+
+

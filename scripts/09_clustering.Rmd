@@ -1,0 +1,155 @@
+---
+title: "09_clustering"
+author: "Ina MP"
+date: "2026-11-19"
+output: github_document
+---
+
+```{r}
+library(factoextra)
+library(cluster)
+library(fpc) 
+library(FactoMineR) 
+library(tidytext) 
+```
+
+```{r}
+source("scripts/homemade_functions/homemade_clusterboot_function.R") # if apply_PCA is T, the hclust with be done on the PCs instead of the scores
+source("scripts/homemade_functions/plot_top_loading.R") # for a PCA obj, plots the variables contributing most to the PC specified
+source("scripts/homemade_functions/compute_vtest.R")
+source("scripts/homemade_functions/plot_vtest_results.R")
+source("scripts/homemade_functions/evaluate_nPC.R")
+```
+
+
+- **Purpose:** Create clusters based on the task scores
+The median is used as score
+Clustering is done both without and after PCA
+- **Input:** wide score df
+- **Output:** 
+  - cluster asignments
+  - plots
+  
+```{r}
+load("data/processed/scores_wide.RData")
+
+df_results_scores_wide <- df_results_scores_wide %>%
+  column_to_rownames('sample')
+```
+
+```{r}
+tasklist <- read.xlsx('data/SWAP_input/tasklist_test_gtex.xlsx')
+
+tasklist_names <- tasklist %>%
+  filter(!is.na(ID)) %>%
+  dplyr::select(c('ID', 'DESCRIPTION', 'SHOULD.FAIL')) %>%
+  mutate(ID = paste('task', ID, sep = '_'))
+```
+
+# Normalisation and scaling
+
+```{r}
+df_scores_scaled <- scale(log2(df_results_scores_wide), scale = T, center = T)
+```
+
+# Hierchichal clustering without PCA
+```{r}
+results_hclust <- hclust(dist(df_scores_scaled, method = 'euclidean'), method = 'ward.D2')
+
+# tree
+plot(, hang = -1)
+
+# silouette
+fviz_silhouette(silhouette(cutree(results_hclust, k=2), dist(df_scores_scaled, method = 'euclidean')))
+
+# stability
+clusterboot(df_scores_scaled,
+            bootmethod = 'boot',
+            distances= F,
+            clustermethod = homemade_clusterboot_function,
+            k=2, 
+            B=500, seed=456)
+```
+From the tree there seems to be 2 clusters
+Silouette for k=2 looks good with 0.25 and 0.42 average width
+Stability is also decent with Jaccard 0.78 and 0.86
+
+Run and plot vtest to see wich variables are different between clusters
+```{r}
+results_vtest <- compute_vtest(df=df_scores_scaled, 
+                                 k=2, 
+                                 hclust_obj = results_hclust)
+
+plot_vtest_results(results_vtest %>% 
+                   filter(adj_pval_BH <= 0.05))
+```
+
+# Hierchical clustering after PCA
+
+```{r}
+PCA <- prcomp(df_scores_scaled, center = F, scale = F) # data is already scaled and centered
+```
+
+```{r}
+summary(PCA)
+PCA$sdev^2 # eigenvalues
+```
+Some use the kaiser criteria (eigenvalue > 1) to choose how many PCs to keep for further analysis 
+In this example only PC1 would meet this criteria, since we are working with only a few tasks
+
+what variables are most important for the first 2 PCs
+```{r}
+plot_top_loading(PCA$rotation, dim_to_plot = 1, n_task = 3)
+plot_top_loading(PCA$rotation, dim_to_plot = 2, n_task = 3)
+```
+
+## clustering on the first 2 PCs
+```{r}
+results_hclust_2PC <- hclust(dist(PCA$x[, 1:2], method = 'euclidean'), method = 'ward.D2')
+
+# tree
+plot(results_hclust_2PC, hang = -1)
+rect.hclust(results_hclust_2PC, k = 2, border = 2:4)
+
+table(cutree(results_hclust_2PC, k = 2))  
+
+# silouette
+fviz_silhouette(silhouette(cutree(results_hclust_2PC, k=2), dist(PCA$x[, 1:2], method = 'euclidean')))
+
+# stability
+clusterboot(df_scores_scaled,
+            bootmethod = 'boot',
+            distances= F,
+            clustermethod = homemade_clusterboot_function,
+            k=2, apply_PCA = T, nPC=2, 
+            B=500, seed=456)
+```
+From the tree would be 2 clusters again
+Silouette is 0.37 and 0.55
+Stability (Jaccard) is 0.79 and 0.86
+Overall a bit better than without PCA
+
+Run and plot vtest to see wich variables are different between clusters
+```{r}
+results_vtest_2PC <- compute_vtest(df=df_scores_scaled, 
+                                 k=2, 
+                                 hclust_obj = results_hclust_2PC)
+
+plot_vtest_results(results_vtest_2PC %>% 
+                   filter(adj_pval_BH <= 0.05))
+```
+
+## Evaluating the number of PCs to keep after PCA
+In this example with only a few tasks it is less relevant,
+but for >100 tasks looking at how the results vary when changing the number of PCs kept is informative
+```{r}
+results_various_n_PCs_PCA <- lapply(c(2,4,5,6), evaluate_nPC, df_scores = df_scores_scaled, k_max = 3) %>%
+  do.call('rbind', .)
+
+results_various_n_PCs_PCA %>%
+  filter(k==2)
+
+results_various_n_PCs_PCA %>%
+  filter(k==3)
+```
+

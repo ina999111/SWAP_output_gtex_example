@@ -1,0 +1,108 @@
+---
+title: "change_GPRless_in_RAS_df"
+output: html_document
+---
+
+```{r}
+library(jsonlite)
+```
+
+
+```{r}
+df_activity <- data.table::fread("C:/Users/inapa/Documents/Repertoire etudiant_IMP/Projets/Projet 15 UMC cardio/stats_UMC cardio/SQLNM_2027/for_SWaPAM/combinations/model_inhouse_v9_data_GTEX_example_n10_tasklist_test_gtex_Eraslan2019V1_UniKPV1/reaction_activity_df.csv")
+
+```
+
+```{r}
+RAS_per_sample_long <- df_activity %>%
+  dplyr::rename('rxn_id' = 'V1') %>%
+  pivot_longer(cols = starts_with('GTEX'), values_to = 'RAS', names_to = 'RNA_name')
+```
+
+load lists of transport and GPRless reactions
+```{r}
+list_exchange_rxns <- fromJSON("data/raw/list_exchange_reactions_model_v9.json")
+list_GPRless_rxns <- fromJSON("data/raw/list_GPRless_model_v9.json")
+list_transport_rxns <- fromJSON("data/raw/list_transport_rxns_model_v9.json")
+
+list_GPRless_non_exchange_rxns <- list_GPRless_rxns[!list_GPRless_rxns %in% list_exchange_rxns]
+
+list_GPRless_transport_rxns <- list_transport_rxns[list_transport_rxns %in% list_GPRless_non_exchange_rxns] # reactions that are transport and are GPRless
+list_GPRless_non_transport_rxns <- list_GPRless_non_exchange_rxns[!list_GPRless_non_exchange_rxns %in% list_transport_rxns] # reactions that are GPRless and are not transport
+```
+
+these list are like MAR00001 but in the df_activity, some have _r or _f suffixes
+so adding a _r and _f version of each reaction to catch all
+
+```{r}
+add_suffixes_to_list <- function(fun_list){c(fun_list, paste0(fun_list, '_f'), paste0(fun_list, '_r'))}
+
+list_transport_rxns <- add_suffixes_to_list(list_transport_rxns)
+list_GPRless_non_exchange_rxns <- add_suffixes_to_list(list_GPRless_non_exchange_rxns)
+list_exchange_rxns <- add_suffixes_to_list(list_exchange_rxns)
+
+list_GPRless_transport_rxns <- add_suffixes_to_list(list_GPRless_transport_rxns)
+list_GPRless_non_transport_rxns <- add_suffixes_to_list(list_GPRless_non_transport_rxns)
+```
+
+verify
+```{r}
+RAS_per_sample_long %>%
+  dplyr::filter(rxn_id %in% list_exchange_rxns) %>%
+  dplyr::filter(RAS != -1)
+# all exchange reactions are -1
+
+RAS_per_sample_long %>%
+  dplyr::filter(rxn_id %in% list_GPRless_transport_rxns) %>%
+  group_by(RNA_name, RAS) %>%
+  summarise(n_rxn = n_distinct(rxn_id), .groups = 'drop') 
+# for GPRless transport rxns, all samples have only 1 value each (sample-specific)
+ 
+RAS_per_sample_long %>%
+  dplyr::filter(rxn_id %in% list_GPRless_non_transport_rxns) %>%
+  group_by(RNA_name, RAS) %>%
+  summarise(n_rxn = n_distinct(rxn_id), .groups = 'drop') 
+# for GPRless non transport rxns, each sample has 2 values (this is because of the difference
+# between Jelle's and I definition of transport rxn...) 
+```
+
+# calculate values to replace with
+for median_RAS_non_transport, keep rxn that are:
+- not exchange
+- not transport
+- not GPRless
+
+for median_RAS_transport, keep rxn thare are:
+- transport
+- not GPRless
+```{r}
+median_RAS_non_transport <- RAS_per_sample_long %>%
+  dplyr::filter(!rxn_id %in% list_exchange_rxns) %>%
+  dplyr::filter(!rxn_id %in% list_transport_rxns) %>%
+  dplyr::filter(!rxn_id %in% list_GPRless_non_exchange_rxns) %>%
+  summarise(median = median(RAS)) %>%
+  pull(median)
+
+Q1_RAS_transport <- RAS_per_sample_long %>%
+  dplyr::filter(rxn_id %in% list_transport_rxns) %>%
+  dplyr::filter(!rxn_id %in% list_GPRless_non_exchange_rxns) %>%
+  summarise(Q1 = quantile(RAS, probs = 0.25)) %>%
+  pull(Q1)
+```
+
+# make replacements
+
+```{r}
+RAS_per_sample_long_imputed <- RAS_per_sample_long %>%
+  mutate(RAS = case_when(rxn_id %in% list_GPRless_non_transport_rxns ~ median_RAS_non_transport,
+                         rxn_id %in% list_GPRless_transport_rxns ~ Q1_RAS_transport,
+                         TRUE ~ RAS))
+
+RAS_per_sample_wide_imputed <- RAS_per_sample_long_imputed %>%
+  pivot_wider(names_from = 'RNA_name', values_from = 'RAS')
+```
+
+save
+```{r}
+data.table::fwrite(RAS_per_sample_wide_imputed,"C:/Users/inapa/Documents/Repertoire etudiant_IMP/Projets/Projet 15 UMC cardio/stats_UMC cardio/SQLNM_2027/for_SWaPAM/combinations/model_inhouse_v9_data_GTEX_example_n10_tasklist_test_gtex_Eraslan2019V1_UniKPV1/reaction_activity_df.csv")
+```

@@ -1,0 +1,63 @@
+---
+title: "04_explore_summary"
+author: "Ina MP"
+date: "2026-11-19"
+output: github_document
+---
+
+```{r}
+library(openxlsx)
+```
+
+- **Purpose:** Explore summary of the results from the SWAP pipeline. 
+  - Making sure there aren't unsusual missing values
+  - Making sure tasks that should fail did
+  - Looking at unviable tasks (failed during optimization)
+
+- **Input:** summary df
+- **Ouput:** none
+
+```{r}
+df_summary <- read.csv("data/SWAP_output/summary.csv")
+```
+
+I like having tasks as 'task_xx'
+```{r}
+df_summary <- df_summary %>%
+  mutate(Task = as.factor(paste0('task_', Task)))
+```
+
+
+```{r}
+tasklist <- read.xlsx('data/SWAP_input/tasklist_test_gtex.xlsx')
+
+tasklist_names <- tasklist %>%
+  filter(!is.na(ID)) %>%
+  dplyr::select(c('ID', 'DESCRIPTION', 'SHOULD.FAIL')) %>%
+  mutate(ID = paste('task', ID, sep = '_'))
+```
+
+# Missingness
+```{r}
+# number of na per column
+colSums(is.na(df_summary))
+
+n_distinct(df_summary$Task) == n_distinct(tasklist_names$ID) # results for 6 tasks, same number as in the tasklist
+n_distinct(df_summary$Sample) # 20 samples
+```
+
+Tasks that should fail
+```{r}
+tasklist_names[tasklist_names$SHOULD.FAIL == 1, ] # in this tasklist none should fail
+
+# are the tasks that should fail in the summary (should not be)
+df_summary %>%
+  filter(Task %in% tasklist_names[tasklist_names$SHOULD.FAIL == 1, ]$ID) # none = good
+```
+
+```{r}
+df_summary %>%
+  filter(Solution_is_feasible == FALSE) # empty so all tasks were feasible
+```
+
+

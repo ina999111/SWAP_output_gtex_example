@@ -1,0 +1,173 @@
+---
+title: "02_normalization"
+author: "Ina MP"
+date: "2026-11-19"
+output: github_document
+---
+
+Purpose: Normalize RNAseq raw counts
+- Removing filtering inactive genes
+- Normalization for gene length
+- Normalization for library size
+Input: 
+- data/raw/counts_subset.RData
+- gene lengths from ensembl release 113
+Ouput: data/processed/counts_GeTMM.RData
+
+```{r}
+library(edgeR)
+library(txdbmaker)
+library(GenomicFeatures)
+```
+
+# load counts
+
+```{r}
+load("data/raw/counts_subset.RData")
+```
+
+gene names in rna data is like ENSGXXXXXX.X
+need to remove .X
+```{r}
+counts_subset_clean <- counts_subset %>%
+  mutate(gene = str_extract(Name, "ENSG[0-9]{11}")) %>%
+  dplyr::select(-Name)
+```
+
+# filter out inactive genes
+```{r}
+counts_subset_clean <- counts_subset_clean %>%
+  column_to_rownames('gene')
+
+genes_to_keep <- filterByExpr(as.matrix(counts_subset_clean))
+
+counts_subset_clean_active <- counts_subset_clean[genes_to_keep,]
+```
+
+# correct for gene length
+
+## download gene length data from ensembl
+
+for gtex v11 genes were aligned on gencode v47 which uses ensembl release 113
+```{r}
+options(timeout = 2400)  # 40 minutes
+download.file("https://ftp.ensembl.org/pub/release-113/gtf/homo_sapiens/Homo_sapiens.GRCh38.113.gtf.gz", 
+              destfile = "data/raw/Homo_sapiens.GRCh38.113.gtf.gz", mode = "wb")
+
+txdb <- txdbmaker::makeTxDbFromGFF("data/raw/Homo_sapiens.GRCh38.113.gtf.gz", format = "gtf")
+
+# Compute exon lengths per gene
+exons_list_per_gene <- exonsBy(txdb, by = "gene")
+
+# for each gene, reduce all the exons to a set of non overlapping exons, calculate their lengths (widths) and sum then
+exonic_gene_sizes <- sum(width(GenomicRanges::reduce(exons_list_per_gene)))
+
+# Divide by 1k to get kilobases 
+exonic_gene_sizes <- exonic_gene_sizes/1000
+```
+
+Compare gene ids between df_RNA and genecode
+All genes in the count data should be in the length df
+Otherwise, there is probably a mismatch between the gtex and ensembl releases used
+```{r}
+counts_subset_clean_active <- counts_subset_clean_active %>%
+  rownames_to_column('gene')
+
+setdiff(counts_subset_clean_active$gene, names(exonic_gene_sizes)) 
+```
+
+## calculate fragment per kilobase (FPK)
+
+add length to RNA data
+dividing expression value by length
+then remove exonic gene size colum
+group by gene and sum (for when multiple ensembl version existed)
+
+```{r}
+counts_lenght_corrected <- counts_subset_clean_active %>%
+  as.data.frame() %>%
+  left_join(data.frame(exonic_gene_sizes, gene = names(exonic_gene_sizes)), by = 'gene') %>% #add length
+  mutate(across(-c('gene', exonic_gene_sizes), ~.x/exonic_gene_sizes)) %>% #divide
+  dplyr::select(-exonic_gene_sizes) %>% #remove length
+  group_by(gene) %>%
+  summarise(across(where(is.numeric), sum)) %>% #sum per gene
+  column_to_rownames('gene') #genes become rownames
+```
+
+# GeTMM transformation 
+(library size correction)
+```{r}
+GeTMM <- DGEList(counts = counts_lenght_corrected)
+GeTMM <- calcNormFactors(GeTMM,method = "TMM")
+GeTMM <- cpm(GeTMM)
+```
+
+# add inactive genes back in as zeros
+zeros will later be changed to a floor value
+create a 0 filled matrix of the right size (size of counts df)
+then replace values with GeTMM for active genes and leave rest empty
+
+```{r}
+df_counts_final <- matrix(data = 0, nrow = nrow(counts_subset_clean), ncol = ncol(counts_subset_clean), 
+                      dimnames = list(rownames(counts_subset_clean), colnames(counts_subset_clean)))
+
+df_counts_final[rownames(GeTMM), colnames(GeTMM)] <- GeTMM
+```
+
+verifications
+```{r}
+df_counts_final[genes_to_keep, ] # should have values
+df_counts_final[!genes_to_keep, ] # should be zeros
+
+all(df_counts_final[rownames(GeTMM), colnames(GeTMM)] == as.matrix(GeTMM)) # all the observations in GeTMM are in the final count file
+```
+
+# change zeros to a floor value (0.001)
+
+not only inactive genes
+because a gene could be considered active and still have 0/close to 0 values for a few sample
+i don't think these values should be higher than the value given to inactive genes
+so everything below 0.001 gets 0.001
+```{r}
+min(df_counts_final)
+df_counts_final[df_counts_final <= 0.001] <- 0.001
+min(df_counts_final)
+```
+
+# vizualise effect of normalization
+
+```{r}
+counts_subset_clean %>%
+  pivot_longer(starts_with('GTEX'), names_to = 'ID', values_to = 'raw_counts') %>%
+  ggplot(., aes(log2(raw_counts), color = ID))+
+  geom_density()+
+  guides(color = 'none')+
+  theme_bw()+
+  labs(title = 'Raw counts distribution')
+
+GeTMM %>%
+  as.data.frame() %>%
+  pivot_longer(starts_with('GTEX'), names_to = 'ID', values_to = 'GeTMM') %>%
+  ggplot(., aes(log2(GeTMM), color = ID))+
+  geom_density()+
+  guides(color = 'none')+
+  theme_bw()+
+  labs(title = 'GeTMM value distribution')
+
+df_counts_final %>%
+  as.data.frame() %>%
+  pivot_longer(starts_with('GTEX'), names_to = 'ID', values_to = 'GeTMM') %>%
+  ggplot(., aes(log2(GeTMM), color = ID))+
+  geom_density()+
+  guides(color = 'none')+
+  theme_bw()+
+  labs(title = 'GeTMM value distribution with inactive genes == 0.001')
+```
+
+save normalized counts
+```{r}
+dir.create("data/processed", recursive = TRUE, showWarnings = FALSE)
+save(df_counts_final, file = "data/processed/df_counts_final.RData")
+write.csv(df_counts_final, file = "data/processed/df_counts_final.csv")
+```
+

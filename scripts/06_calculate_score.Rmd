@@ -1,0 +1,142 @@
+---
+title: "06_calculate_score"
+author: "Ina MP"
+date: "2026-11-19"
+output: github_document
+---
+
+- **Purpose:** Calculate score per task
+This is done after removing GPRless reactions.
+- **Input:** summary df
+- **Output:** score df
+
+```{r}
+library(data.table)
+library(tidyverse)
+```
+
+# load data
+```{r}
+df_summary <- read.csv("data/SWAP_output/summary.csv")
+```
+
+I like having tasks as 'task_xx'
+```{r}
+df_summary <- df_summary %>%
+  mutate(Task = as.factor(paste0('task_', Task)))
+```
+
+```{r}
+tasklist <- read.xlsx('data/SWAP_input/tasklist_test_gtex.xlsx')
+
+tasklist_names <- tasklist %>%
+  filter(!is.na(ID)) %>%
+  dplyr::select(c('ID', 'DESCRIPTION', 'SHOULD.FAIL')) %>%
+  mutate(ID = paste('task', ID, sep = '_'))
+```
+
+loading lists of GPRless reactions
+these reactions id already have the "_r" and "_f" suffixes 
+```{r}
+load("data/raw/list_GPRless_transport_rxns.RData")
+load("data/raw/list_GPRless_non_transport_rxns.RData")
+```
+
+# calculate score
+
+function to make content of the Reactions and Reactions_expression columns into lists 
+They were created directly from json file without formatting, which is why they need parsing
+```{r}
+parse_col <- function(x) {
+  x <- gsub("[][\"']", "", x)             
+  strsplit(x, ", ", fixed = TRUE)[[1]]  
+}
+
+parse_col(df_summary$Reactions[1])
+as.numeric(parse_col(df_summary$Reaction_expression[1]))
+
+```
+
+building a df for a specific sample-task combination
+this will later be used to compute score
+but it can also be used to look at the reactions used by a task and sample
+```{r}
+build_task_specific_df <- function(df_summary, task, sample){
+  
+  subset_summary <- subset(df_summary, Sample == sample & Task == task)
+  
+  df_reactions <- data.frame('rxn_id' = parse_col(subset_summary$Reactions),
+                             'rxn_expression' = as.numeric(parse_col(subset_summary$Reaction_expression)),
+                             'flux' = as.numeric(parse_col(subset_summary$Reaction_fluxes)))
+  
+  # attributing NA to GPRless reactions
+  df_reactions$rxn_expression[df_reactions$rxn_id %in% list_GPRless_transport_rxns] <- NA
+  df_reactions$rxn_expression[df_reactions$rxn_id %in% list_GPRless_non_transport_rxns] <- NA
+  
+  # attribute NA to temporary exchange reactions (which have -1 has expression)
+  df_reactions$rxn_expression[df_reactions$rxn_expression == -1] <- NA 
+  
+  return(df_reactions)
+
+}
+
+build_task_specific_df(df_summary, 'task_411', df_summary$Sample[3]) 
+
+```
+
+function to calculate score
+always excludes GPRless and exchange reactions before calculation
+here "rxn_expression" is the estimated Vmax
+
+metric options:
+- inverse = 1/sum of penalty
+- min = min(rxn_expression)
+- average = mean(rxn_expression)
+- median = median(rxn_expression)
+
+```{r}
+compute_score <- function(df_summary, task, sample, metric){
+  
+  df_reactions <- build_task_specific_df(df_summary, task, sample)
+  
+  if (metric == 'inverse'){
+    df_reactions$penalties <- df_reactions$flux / df_reactions$rxn_expression
+    sum_penalty <- sum(df_reactions$penalties, na.rm = T)
+    score <- 1/sum_penalty
+    
+  } else if (metric == 'min') {
+    score <- min(df_reactions$rxn_expression, na.rm = T)
+  } else if (metric == 'average') {
+    score <- mean(df_reactions$rxn_expression, na.rm = T)
+  } else if (metric == 'median') {
+    score <-  median(df_reactions$rxn_expression, na.rm = T)
+  }
+  
+  return(data.frame(task, sample, score, metric))
+  
+}
+
+compute_score(df_summary, 'task_411', df_summary$Sample[3], 'median') 
+```
+
+apply the function to all task-sample combination
+```{r}
+sample_task_combinations <- expand.grid(sample = unique(df_summary$Sample), task = unique(df_summary$Task), stringsAsFactors = F)
+
+list_results_scores <- mapply(compute_score, MoreArgs = list(df_summary = df_summary, metric = 'median'), task= sample_task_combinations$task, sample = sample_task_combinations$sample, SIMPLIFY = F)
+
+df_results_scores <- list_results_scores %>% do.call(rbind,.)
+```
+
+# save 
+both a long and a wide format
+```{r}
+save(df_results_scores, file = "data/processed/scores_long.RData")
+
+df_results_scores_wide <- df_results_scores %>%
+  dplyr::select(-metric) %>%
+  pivot_wider(names_from = 'task', values_from = 'score')
+
+save(df_results_scores_wide, file = "data/processed/scores_wide.RData")
+```
+

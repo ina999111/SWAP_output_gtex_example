@@ -1,0 +1,111 @@
+---
+title: "07_explore_scores"
+author: "Ina MP"
+date: "2026-11-19"
+output: github_document
+---
+
+
+- **Purpose:** Explore task scores 
+   - summary of score per task
+   - distribution of score per task
+   - tasks with very low scores
+   - tasks with little to no variation
+   - correlation between tasks
+- **Input:** wide score df
+- **Output:** none
+
+```{r}
+library(GGally)
+library(pheatmap)
+```
+
+```{r}
+load("data/processed/scores_long.RData")
+```
+
+# join task numbers and names
+
+```{r}
+tasklist <- read.xlsx('data/SWAP_input/tasklist_test_gtex.xlsx')
+
+tasklist_names <- tasklist %>%
+  filter(!is.na(ID)) %>%
+  dplyr::select(c('ID', 'DESCRIPTION', 'SHOULD.FAIL')) %>%
+  mutate(ID = paste('task', ID, sep = '_'))
+```
+
+```{r}
+df_results_scores <- df_results_scores %>%
+  left_join(tasklist_names, join_by('task' == 'ID')) %>%
+  mutate(task_name = paste0(task, ': ', DESCRIPTION))
+```
+
+# distribution of scores per task
+```{r}
+ggplot(df_results_scores, aes(score, fill = task))+
+  geom_density(alpha = 0.5)+
+  theme_minimal()
+
+ggplot(df_results_scores, aes(y= score, x = fct_reorder(task_name, score)))+
+  geom_point(position = position_jitter(width = 0.2))+
+  geom_boxplot(alpha = 0.5, outlier.alpha = 0)+
+  theme_minimal()+
+  coord_flip()
+```
+
+# summary per task
+
+```{r}
+summary_per_task <- df_results_scores %>%
+  group_by(task) %>%
+  summarise(mean = mean(score, na.rm = T),
+            median = median(score, na.rm = T),
+            sd = sd(score, na.rm = T),
+            CV = sd/mean * 100)
+```
+
+tasks with very low scores
+```{r}
+summary_per_task %>%
+  filter(median <= 1)
+# not the case here but some tasks can be as low as median = 0.0001
+```
+
+tasks with no variation or very low variation
+```{r}
+summary_per_task %>%
+  filter(sd == 0)
+# not the case here, but some tasks use only 1 reaction, and if that reaction is driven by an inactive gene the variation can be null
+
+summary_per_task %>%
+  filter(sd < 1)
+
+summary_per_task %>%
+  filter(CV < 1)
+```
+
+# correlation between tasks
+```{r}
+# plot (not a good idea for >10 tasks)
+df_results_scores %>%
+  dplyr::select(sample, task, score) %>%
+  pivot_wider(names_from = task, values_from = score) %>%
+  ggpairs(lower = list(continuous = wrap('points', alpha = 0.4)),
+          upper = list(continuous = wrap('cor', method = 'spearman')))+
+  theme_bw()
+
+# cor matrix
+cor_matrix <- df_results_scores %>%
+  dplyr::select(sample, task, score) %>%
+  pivot_wider(names_from = task, values_from = score) %>%
+  dplyr::select(-sample) %>%
+  cor(., use = 'pairwise.complete.obs', method = 'spearman')
+
+pheatmap(cor_matrix,
+         color = colorRampPalette(c("blue", "white", "red"))(100),
+         breaks = seq(-1, 1, length.out = 101),   # centres white at 0
+         clustering_method = "ward.D2",
+         fontsize_row = 6, fontsize_col = 6)
+```
+

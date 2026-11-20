@@ -1,0 +1,86 @@
+---
+title: "01_download_gtex"
+author: "Ina MP"
+date: "2026-11-19"
+output: github_document
+---
+
+Purpose: Dowload gtex data (counts and metadata) and choose subset of patients
+Input: Gtex portal download links
+Ouput: 
+- data/raw/samples_and_subjects_clean_subset.RData
+- data/raw/counts_subset.RData
+
+```{r}
+library(tidyverse)
+```
+
+# loading data
+
+Load data from the gtex portal
+Counts are from left ventricule samples
+This is gtex v11, reads were aligned on gencode v47 which uses ensembl release 113
+```{r}
+counts <- read_tsv("https://storage.googleapis.com/adult-gtex/bulk-gex/v11/rna-seq/counts-by-tissue/gene_reads_adult_gtex_v11_heart_left_ventricle.gct.gz", skip=2)
+samples <- read_tsv("https://storage.googleapis.com/adult-gtex/annotations/v11/metadata-files/GTEx_Analysis_v11_Annotations_SampleAttributesDS.txt")
+subjects <- read_tsv("https://storage.googleapis.com/adult-gtex/annotations/v11/metadata-files/GTEx_Analysis_v11_Annotations_SubjectPhenotypesDS.txt")
+```
+
+# cleaning sample df
+
+create donor ID column
+(https://sites.google.com/broadinstitute.org/gtex-faqs/home?pli=1&authuser=0)
+```{r}
+samples_clean <- samples %>%
+  separate_wider_delim(SAMPID, delim = "-", names = c('ID_1', 'ID_2', 'ID_3', 'ID_4', 'ID_5'),
+                       too_few = "align_start", too_many = "merge",
+                       cols_remove = F) %>%
+  mutate(donor_ID = paste(ID_1, ID_2, sep = '-'))
+```
+
+keep only samples that 1. are LV and 2.are in the count file
+```{r}
+samples_clean <- samples_clean %>%
+  filter(SMTSD == 'Heart - Left Ventricle') %>%
+  filter(SAMPID %in% colnames(counts))
+```
+
+keeping only RIN >= 7
+```{r}
+samples_clean <- samples_clean %>%
+  filter(SMRIN >= 7)
+```
+
+# making subset
+
+binding samples and subject info
+```{r}
+samples_and_subjects_clean <- samples_clean %>%
+  left_join(subjects, join_by('donor_ID' == 'SUBJID'))
+```
+
+```{r}
+summary(as.factor(samples_and_subjects_clean$SEX))
+```
+157 men (SEX == 1) and 100 women (SEX == 2)
+
+keeping 10 men and 10 women at random for this example
+```{r}
+samples_and_subjects_clean$SEX <- as.factor(samples_and_subjects_clean$SEX)
+
+samples_and_subjects_clean_subset <- samples_and_subjects_clean %>%
+  group_by(SEX) %>%
+  slice_sample(n=10) %>%
+  ungroup()
+
+counts_subset <- counts[, c('Name', samples_and_subjects_clean_subset$SAMPID)]
+```
+
+saving the subset data
+```{r}
+dir.create("data/raw", recursive = TRUE, showWarnings = FALSE)
+
+save(samples_and_subjects_clean_subset, file = "data/raw/samples_and_subjects_clean_subset.RData")
+save(counts_subset, file = "data/raw/counts_subset.RData")
+```
+
