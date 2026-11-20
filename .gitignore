@@ -3,6 +3,7 @@
 .RData
 .Ruserdata
 data/raw/
-data/processed/
+data/processed/df_counts_final.csv
+data/processed/df_counts_final.RData
 data/SWAP_output/
 script/change_GPRless_in_RAS_df.Rmd
