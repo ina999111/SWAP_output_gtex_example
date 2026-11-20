@@ -16,7 +16,7 @@ The task scores can then be used in different application, for example clusterin
 
 ## Workflow
 
-![Workflow diagram](docs/workflow.jpeg)
+![Workflow diagram](docs/workflow.png)
 
 ## Scripts details
 | script name                       | what it does                                                                                                                                                                               | input                                                                                 | output                                                           |
